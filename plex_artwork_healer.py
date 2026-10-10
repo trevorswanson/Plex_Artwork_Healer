@@ -60,6 +60,7 @@ ENABLE_UPLOAD = env_bool('ENABLE_UPLOAD', True)            # Whether to upload a
 FORCE_UPLOAD_ALL = env_bool('FORCE_UPLOAD_ALL', False)     # If True, re-upload even working images
 DRY_RUN = env_bool('DRY_RUN', True)                        # If True, don't make changes
 ENABLE_LOG = env_bool('ENABLE_LOG', True)                  # If True, write to log file
+REFRESH_BACKUPS = env_bool('REFRESH_BACKUPS', True)        # Update local backups when Plex's current artwork has changed
 SELECT_EXISTING_ART = env_bool('SELECT_EXISTING_ART', True)  # Select existing Plex logo/mobile bg/title card when unset or dead
 WORKERS = max(1, env_number('WORKERS', 8))                 # Parallel worker threads
 DELAY = env_number('DELAY', 0.1, float)                    # Delay (seconds) each worker waits after finishing an item
@@ -108,17 +109,35 @@ def extract_tmdb_id_from_guid(guid):
     return int(match.group(1)) if match else None
 
 # === ARTWORK BACKUP / DOWNLOAD / UPLOAD ===
+def source_marker_path(path):
+    """Sidecar file recording which Plex image URL a backup was taken from"""
+    return os.path.splitext(path)[0] + '.src'
+
+def backup_is_stale(rel_url, path):
+    """True if there is no backup, or it was taken from a different Plex image than the current one"""
+    if not os.path.exists(path):
+        return True
+    try:
+        with open(source_marker_path(path), encoding='utf-8') as f:
+            return f.read().strip() != rel_url
+    except OSError:
+        return True   # No record of the source; refresh once to establish it
+
 def backup_from_plex(item, art_type, path):
-    """Downloads and saves poster or background from Plex"""
+    """Downloads and saves poster or background from Plex (replaces any existing backup only on success)"""
     rel_url = item.thumb if art_type == 'poster' else item.art
     if not rel_url:
         return False
     try:
         url = f"{PLEX_URL}{rel_url}?X-Plex-Token={PLEX_TOKEN}"
-        r = requests.get(url)
-        if r.status_code == 200:
-            with open(path, 'wb') as f:
+        r = requests.get(url, timeout=30)
+        if r.status_code == 200 and r.content:
+            tmp = path + '.tmp'
+            with open(tmp, 'wb') as f:
                 f.write(r.content)
+            os.replace(tmp, path)
+            with open(source_marker_path(path), 'w', encoding='utf-8') as f:
+                f.write(rel_url)
             log(f"[BACKUP] Saved {art_type} for {item.title} from Plex")
             return True
     except Exception as e:
@@ -207,12 +226,16 @@ def load_tmdb_cache():
 def fix_art(item, library, art_type, cache):
     title = item.title
     rel_url = item.thumb if art_type == 'poster' else item.art
-    broken = FORCE_UPLOAD_ALL or not rel_url or artwork_url_invalid(f"{PLEX_URL}{rel_url}?X-Plex-Token={PLEX_TOKEN}")
+    dead = not rel_url or artwork_url_invalid(f"{PLEX_URL}{rel_url}?X-Plex-Token={PLEX_TOKEN}")
+    broken = FORCE_UPLOAD_ALL or dead
     backup_path = get_artwork_path(library, title, art_type)
     ensure_folder(os.path.dirname(backup_path))
 
-    # Step 1: Backup if not already done
-    if not os.path.exists(backup_path):
+    # Step 1: Back up working artwork if there's no backup yet, or (optionally) if Plex's artwork has changed.
+    # Never back up dead artwork, so a good backup is never replaced by a bad one.
+    if not dead and (not os.path.exists(backup_path) or (REFRESH_BACKUPS and backup_is_stale(rel_url, backup_path))):
+        if os.path.exists(backup_path):
+            log(f"[REFRESH] {title} {art_type} changed in Plex; updating backup")
         backup_from_plex(item, art_type, backup_path)
 
     # Step 2: Skip if not broken and not forcing
