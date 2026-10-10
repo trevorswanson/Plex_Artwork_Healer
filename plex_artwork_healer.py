@@ -22,6 +22,7 @@ ENABLE_UPLOAD = True                       # Whether to upload artwork to Plex
 FORCE_UPLOAD_ALL = False                   # If True, re-upload even working images
 DRY_RUN = False                            # If True, don't make changes
 ENABLE_LOG = True                          # If True, write to log file
+SELECT_EXISTING_ART = True                 # Select an artwork Plex already has when logo/mobile bg/title card is unset or dead
 DELAY = 1                                  # Delay (in seconds) between items
 
 # === TMDb SETUP ===
@@ -208,11 +209,52 @@ def fix_art(item, library, art_type, cache):
     else:
         log(f"[MISSING] No {art_type} found for {title}")
 
+# === SELECT EXISTING PLEX ARTWORK (clear logos, mobile backgrounds, title cards) ===
+# TMDb has none of these, so we only pick from what Plex already has available.
+# kind -> (label, current path getter, candidates method name)
+EXISTING_ART_KINDS = {
+    'clearLogo':    ('clear logo',        lambda i: i.logo,      'logos'),
+    'mobileBg':     ('mobile background', lambda i: i.squareArt, 'squareArts'),
+    'titleCard':    ('title card',        lambda i: i.thumb,     'posters'),   # episodes only
+}
+
+def select_existing_art(item, kind, label=None):
+    """If the item's art of this kind is unset or dead, select the first one Plex has available"""
+    desc, current, candidates_fn = EXISTING_ART_KINDS[kind]
+    name = label or item.title
+    try:
+        rel_url = current(item)
+        if rel_url and not artwork_url_invalid(f"{PLEX_URL}{rel_url}?X-Plex-Token={PLEX_TOKEN}"):
+            return
+        candidates = getattr(item, candidates_fn)()
+        if not candidates:
+            log(f"[MISSING] No {desc} available in Plex for {name}")
+            return
+        if rel_url:
+            # Skip the dead one that is already selected
+            candidates = [c for c in candidates if not c.selected] or candidates
+        log(f"[SELECT] Selecting first available {desc} for {name}")
+        if ENABLE_UPLOAD and not DRY_RUN:
+            getattr(item, {'logos': 'setLogo', 'squareArts': 'setSquareArt', 'posters': 'setPoster'}[candidates_fn])(candidates[0])
+    except Exception as e:
+        log(f"[ERROR] Failed selecting {desc} for {name}: {e}")
+
 def process_section(section, library, cache):
     """Processes all items in a Plex library section"""
     for item in section.all():
         fix_art(item, library, 'poster', cache)
         fix_art(item, library, 'background', cache)
+        if SELECT_EXISTING_ART:
+            select_existing_art(item, 'clearLogo')
+            select_existing_art(item, 'mobileBg')
+            if item.type == 'show':
+                try:
+                    episodes = item.episodes()
+                except Exception as e:
+                    log(f"[ERROR] Failed listing episodes for {item.title}: {e}")
+                    episodes = []
+                for ep in episodes:
+                    select_existing_art(ep, 'titleCard', f"{item.title} S{ep.seasonNumber:02}E{ep.episodeNumber:02}")
         time.sleep(DELAY)
 
 # === MAIN ENTRY POINT ===
