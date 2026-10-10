@@ -1,0 +1,6 @@
+.env
+.DS_Store
+artwork_healer.log
+tmdb_cache.csv
+Posters/
+__pycache__/
