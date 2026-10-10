@@ -19,21 +19,47 @@ def require_env(name):
         raise SystemExit(f"Missing required setting {name}. Copy .env.example to .env and fill it in.")
     return value
 
+def env_str(name, default):
+    value = os.environ.get(name)
+    return value.strip() if value and value.strip() else default
+
+def env_bool(name, default):
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() in ('1', 'true', 'yes', 'on')
+
+def env_number(name, default, cast=int):
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return cast(value.strip())
+    except ValueError:
+        raise SystemExit(f"Invalid value for {name}: {value!r} (expected {cast.__name__})")
+
+def env_list(name, default):
+    value = os.environ.get(name)
+    items = [v.strip() for v in value.split(',') if v.strip()] if value else []
+    return items or default
+
+# Required (no defaults)
 PLEX_URL = require_env('PLEX_URL')         # Plex server base URL
 PLEX_TOKEN = require_env('PLEX_TOKEN')     # Plex API token
 TMDB_API_KEY = require_env('TMDB_API_KEY') # TMDb API key
 
-LIBRARIES = ['Movies', 'TV Shows']         # Plex libraries to process
-BASE_DIR = 'Posters'                       # Directory to store artwork backups
-LOG_FILE = 'artwork_healer.log'            # Output log file
-CACHE_FILE = 'tmdb_cache.csv'              # TMDb ID cache CSV file
+# Optional (defaults here, overridable in .env)
+LIBRARIES = env_list('LIBRARIES', ['Movies', 'TV Shows'])  # Plex libraries to process (comma-separated)
+BASE_DIR = env_str('BASE_DIR', 'Posters')                  # Directory to store artwork backups
+LOG_FILE = env_str('LOG_FILE', 'artwork_healer.log')       # Output log file
+CACHE_FILE = env_str('CACHE_FILE', 'tmdb_cache.csv')       # TMDb ID cache CSV file
 
-ENABLE_UPLOAD = True                       # Whether to upload artwork to Plex
-FORCE_UPLOAD_ALL = False                   # If True, re-upload even working images
-DRY_RUN = False                            # If True, don't make changes
-ENABLE_LOG = True                          # If True, write to log file
-SELECT_EXISTING_ART = True                 # Select an artwork Plex already has when logo/mobile bg/title card is unset or dead
-DELAY = 1                                  # Delay (in seconds) between items
+ENABLE_UPLOAD = env_bool('ENABLE_UPLOAD', True)            # Whether to upload artwork to Plex
+FORCE_UPLOAD_ALL = env_bool('FORCE_UPLOAD_ALL', False)     # If True, re-upload even working images
+DRY_RUN = env_bool('DRY_RUN', True)                        # If True, don't make changes
+ENABLE_LOG = env_bool('ENABLE_LOG', True)                  # If True, write to log file
+SELECT_EXISTING_ART = env_bool('SELECT_EXISTING_ART', True)  # Select existing Plex logo/mobile bg/title card when unset or dead
+DELAY = env_number('DELAY', 1.0, float)                    # Delay (seconds) between items
 
 # === TMDb SETUP ===
 tmdb = TMDb()
