@@ -5,13 +5,23 @@ import time
 import csv
 import datetime
 import requests
+from dotenv import load_dotenv
 from plexapi.server import PlexServer
 from tmdbv3api import TMDb, Movie
 
 # === CONFIGURATION ===
-PLEX_URL = 'http://<PLEX_IP>:32400'        # Plex server base URL
-PLEX_TOKEN = 'PLEX_TOKEN'                  # Plex API token
-TMDB_API_KEY = 'TMDB API'                  # TMDb API key
+load_dotenv()                              # Reads secrets from a local .env file (see .env.example)
+
+def require_env(name):
+    """Returns a required environment variable or exits with a helpful message"""
+    value = os.environ.get(name)
+    if not value:
+        raise SystemExit(f"Missing required setting {name}. Copy .env.example to .env and fill it in.")
+    return value
+
+PLEX_URL = require_env('PLEX_URL')         # Plex server base URL
+PLEX_TOKEN = require_env('PLEX_TOKEN')     # Plex API token
+TMDB_API_KEY = require_env('TMDB_API_KEY') # TMDb API key
 
 LIBRARIES = ['Movies', 'TV Shows']         # Plex libraries to process
 BASE_DIR = 'Posters'                       # Directory to store artwork backups
