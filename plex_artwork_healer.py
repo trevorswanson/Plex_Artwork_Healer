@@ -4,6 +4,8 @@ import re
 import time
 import csv
 import datetime
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from dotenv import load_dotenv
 from plexapi.server import PlexServer
@@ -59,7 +61,8 @@ FORCE_UPLOAD_ALL = env_bool('FORCE_UPLOAD_ALL', False)     # If True, re-upload 
 DRY_RUN = env_bool('DRY_RUN', True)                        # If True, don't make changes
 ENABLE_LOG = env_bool('ENABLE_LOG', True)                  # If True, write to log file
 SELECT_EXISTING_ART = env_bool('SELECT_EXISTING_ART', True)  # Select existing Plex logo/mobile bg/title card when unset or dead
-DELAY = env_number('DELAY', 1.0, float)                    # Delay (seconds) between items
+WORKERS = max(1, env_number('WORKERS', 8))                 # Parallel worker threads
+DELAY = env_number('DELAY', 0.1, float)                    # Delay (seconds) each worker waits after finishing an item
 
 # === TMDb SETUP ===
 tmdb = TMDb()
@@ -68,12 +71,15 @@ tmdb.language = 'en'
 movie_search = Movie()                     # TMDb movie search instance
 
 # === LOGGING UTILITY ===
+_log_lock = threading.Lock()
+
 def log(msg):
-    """Prints and logs messages with timestamp"""
-    print(msg)
-    if ENABLE_LOG:
-        with open(LOG_FILE, 'a', encoding='utf-8') as f:
-            f.write(f"{datetime.datetime.now()} - {msg}\n")
+    """Prints and logs messages with timestamp (thread-safe)"""
+    with _log_lock:
+        print(msg)
+        if ENABLE_LOG:
+            with open(LOG_FILE, 'a', encoding='utf-8') as f:
+                f.write(f"{datetime.datetime.now()} - {msg}\n")
 
 # === FILE SYSTEM HELPERS ===
 def safe_filename(name):
@@ -87,8 +93,8 @@ def ensure_folder(path):
 def artwork_url_invalid(url):
     """Checks if a given artwork URL is invalid or unreachable"""
     try:
-        r = requests.get(url, timeout=5)
-        return r.status_code != 200
+        with requests.get(url, timeout=5, stream=True) as r:   # stream: don't download the body
+            return r.status_code != 200
     except:
         return True
 
@@ -275,23 +281,39 @@ def select_existing_art(item, kind, label=None):
     except Exception as e:
         log(f"[ERROR] Failed selecting {desc} for {name}: {e}")
 
+def process_item(item, library, cache):
+    """Heals all artwork types for a single movie or show"""
+    fix_art(item, library, 'poster', cache)
+    fix_art(item, library, 'background', cache)
+    if SELECT_EXISTING_ART:
+        select_existing_art(item, 'clearLogo')
+        select_existing_art(item, 'mobileBg')
+
+def process_episode(ep):
+    """Selects an existing title card for a single episode"""
+    label = f"{ep.grandparentTitle} S{ep.seasonNumber or 0:02}E{ep.episodeNumber or 0:02}"
+    select_existing_art(ep, 'titleCard', label)
+
+def run_parallel(tasks):
+    """Runs (func, args) tasks across WORKERS threads; each worker pauses DELAY after a task"""
+    def run(func, args):
+        try:
+            func(*args)
+        except Exception as e:
+            log(f"[ERROR] Unhandled error in {func.__name__}: {e}")
+        time.sleep(DELAY)
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        for future in as_completed([pool.submit(run, f, a) for f, a in tasks]):
+            future.result()
+
 def process_section(section, library, cache):
     """Processes all items in a Plex library section"""
-    for item in section.all():
-        fix_art(item, library, 'poster', cache)
-        fix_art(item, library, 'background', cache)
-        if SELECT_EXISTING_ART:
-            select_existing_art(item, 'clearLogo')
-            select_existing_art(item, 'mobileBg')
-            if item.type == 'show':
-                try:
-                    episodes = item.episodes()
-                except Exception as e:
-                    log(f"[ERROR] Failed listing episodes for {item.title}: {e}")
-                    episodes = []
-                for ep in episodes:
-                    select_existing_art(ep, 'titleCard', f"{item.title} S{ep.seasonNumber:02}E{ep.episodeNumber:02}")
-        time.sleep(DELAY)
+    tasks = [(process_item, (item, library, cache)) for item in section.all()]
+    if SELECT_EXISTING_ART and section.type == 'show':
+        # One query for every episode in the library instead of one per show
+        tasks += [(process_episode, (ep,)) for ep in section.searchEpisodes()]
+    log(f"Queued {len(tasks)} tasks across {WORKERS} workers")
+    run_parallel(tasks)
 
 # === MAIN ENTRY POINT ===
 def main():
